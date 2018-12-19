@@ -165,9 +165,64 @@ public class Builder {
     }
 
     /**
+     * Executes a command with {@link ProcessBuilder}, but also logs the call
+     * and redirects its input and output to our process.
+     *
+     * @param command to have {@link ProcessBuilder} execute
+     * @param workingDirectory to pass to {@link ProcessBuilder#directory()}
+     * @param environmentVariables to put in {@link ProcessBuilder#environment()}
+     * @return the exit value of the command
+     * @throws IOException
+     * @throws InterruptedException
+     */
+    int executeCommand(List<String> command, File workingDirectory,
+            Map<String,String> environmentVariables) throws IOException, InterruptedException {
+        String platform = Loader.getPlatform();
+        boolean windows = platform.startsWith("windows");
+        for (int i = 0; i < command.size(); i++) {
+            String arg = command.get(i);
+            if (arg == null) {
+                arg = "";
+            }
+            if (arg.trim().isEmpty() && windows) {
+                // seems to be the only way to pass empty arguments on Windows?
+                arg = "\"\"";
+            }
+            command.set(i, arg);
+        }
+
+        String text = "";
+        for (String s : command) {
+            boolean hasSpaces = s.indexOf(" ") > 0 || s.isEmpty();
+            if (hasSpaces) {
+                text += windows ? "\"" : "'";
+            }
+            text += s;
+            if (hasSpaces) {
+                text += windows ? "\"" : "'";
+            }
+            text += " ";
+        }
+        logger.info(text);
+
+        ProcessBuilder pb = new ProcessBuilder(command);
+        if (workingDirectory != null) {
+            pb.directory(workingDirectory);
+        }
+        if (environmentVariables != null) {
+            for (Map.Entry<String,String> e : environmentVariables.entrySet()) {
+                if (e.getKey() != null && e.getValue() != null) {
+                    pb.environment().put(e.getKey(), e.getValue());
+                }
+            }
+        }
+        return pb.inheritIO().start().waitFor();
+    }
+
+    /**
      * Launches and waits for the native compiler to produce a native shared library.
      *
-     * @param sourceFilename the C++ source filename
+     * @param sourceFilenames the C++ source filenames
      * @param outputFilename the output filename of the shared library
      * @param properties the Properties detailing the compiler options to use
      * @return the result of {@link Process#waitFor()}
@@ -313,6 +368,36 @@ public class Builder {
         {
             String p = properties.getProperty("platform.link.prefix", "");
             String x = properties.getProperty("platform.link.suffix", "");
+
+            String linkPrefix = "";
+            String linkSuffix = "";
+            List<String> linkBeforeOptions = new ArrayList<>();
+            List<String> linkAfterOptions  = new ArrayList<>();
+
+            if (p.endsWith(" ")) {
+                linkBeforeOptions.addAll(Arrays.asList(p.trim().split(" ")));
+            } else {
+                int lastSpaceIndex = p.lastIndexOf(" ");
+                if (lastSpaceIndex != -1) {
+                    linkBeforeOptions.addAll(Arrays.asList(p.substring(0, lastSpaceIndex).split(" ")));
+                    linkPrefix = p.substring(lastSpaceIndex + 1);
+                } else {
+                    linkPrefix = p;
+                }
+            }
+
+            if (x.startsWith(" ")) {
+                linkAfterOptions.addAll(Arrays.asList(x.trim().split(" ")));
+            } else {
+                int firstSpaceIndex = x.indexOf(" ");
+                if (firstSpaceIndex != -1) {
+                    linkSuffix = x.substring(0, firstSpaceIndex);
+                    linkAfterOptions.addAll(Arrays.asList(x.substring(firstSpaceIndex + 1).split(" ")));
+                } else {
+                    linkSuffix = x;
+                }
+            }
+
             int i = command.size(); // to inverse order and satisfy typical compilers
             for (String s : properties.get("platform.link")) {
                 String[] libnameversion = s.split("#")[0].split("@");
@@ -322,15 +407,12 @@ public class Builder {
                 } else {
                     s = libnameversion[0];
                 }
-                if (p.endsWith(" ") && x.startsWith(" ")) {
-                    command.add(i, p.trim()); command.add(i + 1, s); command.add(i + 2, x.trim());
-                } else if (p.endsWith(" ")) {
-                    command.add(i, p.trim()); command.add(i + 1, s + x);
-                } else if (x.startsWith(" ")) {
-                    command.add(i, p + s); command.add(i + 1, x.trim());
-                } else {
-                    command.add(i, p + s + x);
-                }
+                List<String> l = new ArrayList<>();
+                l.addAll(linkBeforeOptions);
+                l.add(linkPrefix + s + linkSuffix);
+                l.addAll(linkAfterOptions);
+
+                command.addAll(i, l);
             }
         }
 
@@ -376,36 +458,19 @@ public class Builder {
             command.set(i, arg);
         }
 
-        String text = "";
-        for (String s : command) {
-            boolean hasSpaces = s.indexOf(" ") > 0 || s.isEmpty();
-            if (hasSpaces) {
-                text += windows ? "\"" : "'";
-            }
-            text += s;
-            if (hasSpaces) {
-                text += windows ? "\"" : "'";
-            }
-            text += " ";
-        }
-        logger.info(text);
-
-        ProcessBuilder pb = new ProcessBuilder(command);
         // Use the library output path as the working directory so that all
         // build files, including intermediate ones from MSVC, are dumped there
-        pb.directory(workingDirectory);
-        if (environmentVariables != null) {
-            pb.environment().putAll(environmentVariables);
-        }
-        return pb.inheritIO().start().waitFor();
+        return executeCommand(command, workingDirectory, environmentVariables);
     }
 
     /**
-     * Generates a C++ source file for classes, and compiles everything in
+     * Generates C++ source files for classes, and compiles everything in
      * one shared library when {@code compile == true}.
      *
      * @param classes the Class objects as input to Generator
      * @param outputName the output name of the shared library
+     * @param first of the batch, so generate jnijavacpp.cpp
+     * @param last of the batch, so delete jnijavacpp.cpp
      * @return the actual File generated, either the compiled library or its source
      * @throws IOException
      * @throws InterruptedException
@@ -424,9 +489,23 @@ public class Builder {
         if (outputPath == null) {
             URI uri = null;
             try {
-                String resourceName = '/' + classes[classes.length - 1].getName().replace('.', '/')  + ".class";
-                String resourceURL = classes[classes.length - 1].getResource(resourceName).toString();
-                uri = new URI(resourceURL.substring(0, resourceURL.lastIndexOf('/') + 1));
+                String resourceName = '/' + classes[0].getName().replace('.', '/')  + ".class";
+                String resourceURL = Loader.findResource(classes[0], resourceName).toString();
+                String packageURI = resourceURL.substring(0, resourceURL.lastIndexOf('/') + 1);
+                for (int i = 1; i < classes.length; i++) {
+                    // Use shortest common package name among all classes as default output path
+                    String resourceName2 = '/' + classes[i].getName().replace('.', '/')  + ".class";
+                    String resourceURL2 = Loader.findResource(classes[i], resourceName2).toString();
+                    String packageURI2 = resourceURL2.substring(0, resourceURL2.lastIndexOf('/') + 1);
+
+                    String longest = packageURI2.length() > packageURI.length() ? packageURI2 : packageURI;
+                    String shortest = packageURI2.length() < packageURI.length() ? packageURI2 : packageURI;
+                    while (!longest.startsWith(shortest) && shortest.lastIndexOf('/') > 0) {
+                        shortest = shortest.substring(0, shortest.lastIndexOf('/'));
+                    }
+                    packageURI = shortest;
+                }
+                uri = new URI(packageURI);
                 boolean isFile = "file".equals(uri.getScheme());
                 File classPath = new File(classScanner.getClassLoader().getPaths()[0]).getCanonicalFile();
                 // If our class is not a file, use first path of the user class loader as base for our output path
@@ -602,9 +681,11 @@ public class Builder {
     String outputName = null;
     /** The name of the JAR file to create, if not {@code null}. */
     String jarPrefix = null;
+    /** If true, attempts to generate C++ JNI files, but if false, only attempts to parse header files. */
+    boolean generate = true;
     /** If true, compiles the generated source file to a shared library and deletes source. */
     boolean compile = true;
-    /** If true, preserves the generated C++ JNI files after compilation */
+    /** If true, preserves the generated C++ JNI files after compilation. */
     boolean deleteJniFiles = true;
     /** If true, also generates C++ header files containing declarations of callback functions. */
     boolean header = false;
@@ -648,6 +729,11 @@ public class Builder {
     /** Sets the {@link #outputDirectory} field to the argument. */
     public Builder outputDirectory(File outputDirectory) {
         this.outputDirectory = outputDirectory;
+        return this;
+    }
+    /** Sets the {@link #generate} field to the argument. */
+    public Builder generate(boolean generate) {
+        this.generate = generate;
         return this;
     }
     /** Sets the {@link #compile} field to the argument. */
@@ -787,41 +873,6 @@ public class Builder {
     public File[] build() throws IOException, InterruptedException, ParserException {
         if (buildCommand != null && buildCommand.length > 0) {
             List<String> command = Arrays.asList(buildCommand);
-            String platform  = Loader.getPlatform();
-            boolean windows = platform.startsWith("windows");
-            for (int i = 0; i < command.size(); i++) {
-                String arg = command.get(i);
-                if (arg == null) {
-                    arg = "";
-                }
-                if (arg.trim().isEmpty() && windows) {
-                    // seems to be the only way to pass empty arguments on Windows?
-                    arg = "\"\"";
-                }
-                command.set(i, arg);
-            }
-
-            String text = "";
-            for (String s : command) {
-                boolean hasSpaces = s.indexOf(" ") > 0 || s.isEmpty();
-                if (hasSpaces) {
-                    text += windows ? "\"" : "'";
-                }
-                text += s;
-                if (hasSpaces) {
-                    text += windows ? "\"" : "'";
-                }
-                text += " ";
-            }
-            logger.info(text);
-
-            ProcessBuilder pb = new ProcessBuilder(command);
-            if (workingDirectory != null) {
-                pb.directory(workingDirectory);
-            }
-            if (environmentVariables != null) {
-                pb.environment().putAll(environmentVariables);
-            }
             String paths = properties.getProperty("platform.buildpath", "");
             String links = properties.getProperty("platform.linkresource", "");
             String resources = properties.getProperty("platform.buildresource", "");
@@ -876,11 +927,14 @@ public class Builder {
                     }
                 }
                 if (paths.length() > 0) {
-                    pb.environment().put("BUILD_PATH", paths);
-                    pb.environment().put("BUILD_PATH_SEPARATOR", separator);
+                    if (environmentVariables == null) {
+                        environmentVariables = new LinkedHashMap<String,String>();
+                    }
+                    environmentVariables.put("BUILD_PATH", paths);
+                    environmentVariables.put("BUILD_PATH_SEPARATOR", separator);
                 }
             }
-            int exitValue = pb.inheritIO().start().waitFor();
+            int exitValue = executeCommand(command, workingDirectory, environmentVariables);
             if (exitValue != 0) {
                 throw new RuntimeException("Process exited with an error: " + exitValue);
             }
@@ -897,28 +951,42 @@ public class Builder {
             if (Loader.getEnclosingClass(c) != c) {
                 continue;
             }
+            // Do not inherit properties when parsing because it generates annotations itself
             ClassProperties p = Loader.loadProperties(c, properties, false);
+            if (p.isLoaded()) {
+                try {
+                    if (Arrays.asList(c.getInterfaces()).contains(BuildEnabled.class)) {
+                        ((BuildEnabled)c.newInstance()).init(logger, properties, encoding);
+                    }
+                } catch (ClassCastException | InstantiationException | IllegalAccessException e) {
+                    // fail silently as if the interface wasn't implemented
+                }
+                String target = p.getProperty("global");
+                if (target != null && !c.getName().equals(target)) {
+                    boolean found = false;
+                    for (Class c2 : classScanner.getClasses()) {
+                        // do not try to regenerate classes that are already scheduled for C++ compilation
+                        found |= c2.getName().equals(target);
+                    }
+                    if (!generate || !found) {
+                        File f = parse(classScanner.getClassLoader().getPaths(), c);
+                        if (f != null) {
+                            outputFiles.add(f);
+                        }
+                    }
+                    continue;
+                }
+            }
+            if (!p.isLoaded()) {
+                // Now try to inherit to generate C++ source files
+                p = Loader.loadProperties(c, properties, true);
+            }
             if (!p.isLoaded()) {
                 logger.warn("Could not load platform properties for " + c);
                 continue;
             }
-            try {
-                if (Arrays.asList(c.getInterfaces()).contains(BuildEnabled.class)) {
-                    ((BuildEnabled)c.newInstance()).init(logger, properties, encoding);
-                }
-            } catch (ClassCastException | InstantiationException | IllegalAccessException e) {
-                // fail silently as if the interface wasn't implemented
-            }
-            String target = p.getProperty("target");
-            if (target != null && !c.getName().equals(target)) {
-                File f = parse(classScanner.getClassLoader().getPaths(), c);
-                if (f != null) {
-                    outputFiles.add(f);
-                }
-                continue;
-            }
             String libraryName = outputName != null ? outputName : p.getProperty("platform.library", "");
-            if (libraryName.length() == 0) {
+            if (!generate || libraryName.length() == 0) {
                 continue;
             }
             LinkedHashSet<Class> classList = map.get(libraryName);
@@ -1048,10 +1116,10 @@ public class Builder {
         }
         System.out.println(
             "JavaCPP version " + version + "\n" +
-            "Copyright (C) 2011-2017 Samuel Audet <samuel.audet@gmail.com>\n" +
+            "Copyright (C) 2011-2018 Samuel Audet <samuel.audet@gmail.com>\n" +
             "Project site: https://github.com/bytedeco/javacpp");
         System.out.println();
-        System.out.println("Usage: java -jar javacpp.jar [options] [class or package (suffixed with .* or .**)]");
+        System.out.println("Usage: java -jar javacpp.jar [options] [class or package (suffixed with .* or .**)] [commands]");
         System.out.println();
         System.out.println("where options include:");
         System.out.println();
@@ -1059,7 +1127,8 @@ public class Builder {
         System.out.println("    -encoding <name>       Character encoding used for input and output files");
         System.out.println("    -d <directory>         Output all generated files to directory");
         System.out.println("    -o <name>              Output everything in a file named after given name");
-        System.out.println("    -nocompile             Do not compile or delete the generated source files");
+        System.out.println("    -nogenerate            Do not try to generate C++ source files, only try to parse header files");
+        System.out.println("    -nocompile             Do not compile or delete the generated C++ source files");
         System.out.println("    -nodelete              Do not delete generated C++ JNI files after compilation");
         System.out.println("    -header                Generate header file with declarations of callbacks functions");
         System.out.println("    -copylibs              Copy to output directory dependent libraries (link and preload)");
@@ -1069,6 +1138,10 @@ public class Builder {
         System.out.println("    -propertyfile <file>   Load all properties from file");
         System.out.println("    -D<property>=<value>   Set property to value");
         System.out.println("    -Xcompiler <option>    Pass option directly to compiler");
+        System.out.println();
+        System.out.println("and where optional commands include:");
+        System.out.println();
+        System.out.println("    -exec [args...]        After build, call java command on the first class");
         System.out.println();
     }
 
@@ -1081,6 +1154,7 @@ public class Builder {
     public static void main(String[] args) throws Exception {
         boolean addedClasses = false;
         Builder builder = new Builder();
+        String[] execArgs = null;
         for (int i = 0; i < args.length; i++) {
             if ("-help".equals(args[i]) || "--help".equals(args[i])) {
                 printHelp();
@@ -1093,6 +1167,8 @@ public class Builder {
                 builder.outputDirectory(args[++i]);
             } else if ("-o".equals(args[i])) {
                 builder.outputName(args[++i]);
+            } else if ("-nocpp".equals(args[i]) || "-nogenerate".equals(args[i])) {
+                builder.generate(false);
             } else if ("-cpp".equals(args[i]) || "-nocompile".equals(args[i])) {
                 builder.compile(false);
             } else if ("-nodelete".equals(args[i])) {
@@ -1113,18 +1189,50 @@ public class Builder {
                 builder.property(args[i]);
             } else if ("-Xcompiler".equals(args[i])) {
                 builder.compilerOptions(args[++i]);
+            } else if ("-exec".equals(args[i])) {
+                execArgs = Arrays.copyOfRange(args, i + 1, args.length);
+                i = args.length;
             } else if (args[i].startsWith("-")) {
                 builder.logger.error("Invalid option \"" + args[i] + "\"");
                 printHelp();
                 System.exit(1);
             } else {
-                builder.classesOrPackages(args[i]);
+                String arg = args[i];
+                if (arg.endsWith(".java")) {
+                    // We got a source file instead, let's try to compile it first
+                    ArrayList<String> command = new ArrayList<String>(Arrays.asList("javac", "-cp"));
+                    String paths = System.getProperty("java.class.path");
+                    for (String path : builder.classScanner.getClassLoader().getPaths()) {
+                        paths += File.pathSeparator + path;
+                    }
+                    command.add(paths);
+                    command.add(arg);
+                    int exitValue = builder.executeCommand(command, builder.workingDirectory, builder.environmentVariables);
+                    if (exitValue != 0) {
+                        throw new RuntimeException("Could not compile " + arg + ": " + exitValue);
+                    }
+                    arg = arg.replace(File.separatorChar, '.').replace('/', '.').substring(0, arg.length() - 5);
+                }
+                builder.classesOrPackages(arg);
                 addedClasses = true;
             }
         }
         if (!addedClasses) {
             builder.classesOrPackages((String[])null);
         }
-        builder.build();
+        File[] outputFiles = builder.build();
+        Collection<Class> classes = builder.classScanner.getClasses();
+        if (outputFiles != null && outputFiles.length > 0 && !classes.isEmpty() && execArgs != null) {
+            Class c = classes.iterator().next();
+            ArrayList<String> command = new ArrayList<String>(Arrays.asList("java", "-cp"));
+            String paths = System.getProperty("java.class.path");
+            for (String path : builder.classScanner.getClassLoader().getPaths()) {
+                paths += File.pathSeparator + path;
+            }
+            command.add(paths);
+            command.add(c.getCanonicalName());
+            command.addAll(Arrays.asList(execArgs));
+            System.exit(builder.executeCommand(command, builder.workingDirectory, builder.environmentVariables));
+        }
     }
 }

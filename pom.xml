@@ -4,7 +4,7 @@
   <modelVersion>4.0.0</modelVersion>
   <groupId>org.bytedeco</groupId>
   <artifactId>javacpp</artifactId>
-  <version>1.4.3-SNAPSHOT</version>
+  <version>1.4.4-SNAPSHOT</version>
 
   <name>JavaCPP</name>
   <description>The missing bridge between Java and native C++</description>
@@ -165,7 +165,6 @@
               <mainClass>org.bytedeco.javacpp.tools.Builder</mainClass>
             </manifest>
             <manifestEntries>
-              <Class-Path>.</Class-Path>
               <Name>org/bytedeco/javacpp/</Name>
               <Implementation-Title>${project.name}</Implementation-Title>
               <Implementation-Vendor>Bytedeco</Implementation-Vendor>
@@ -270,6 +269,79 @@
             <configuration>
               <doclint>none</doclint>
             </configuration>
+          </plugin>
+        </plugins>
+      </build>
+    </profile>
+
+    <!-- If we have at least Java 9, compile module-info.class as well and create a multi-release JAR -->
+    <profile>
+      <id>module-java9-enable</id>
+      <activation>
+        <jdk>[9,)</jdk>
+      </activation>
+      <build>
+        <plugins>
+          <plugin>
+            <artifactId>maven-compiler-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>java9</id>
+                <phase>compile</phase>
+                <goals>
+                  <goal>compile</goal>
+                </goals>
+                <configuration>
+                  <source>9</source>
+                  <target>9</target>
+                  <compileSourceRoots>
+                    <compileSourceRoot>${project.basedir}/src/main/java9</compileSourceRoot>
+                  </compileSourceRoots>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <!-- Copy module-info.class into META-INF and make sure to exclude the original from the JAR file -->
+          <plugin>
+            <artifactId>maven-resources-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>java9</id>
+                <phase>prepare-package</phase>
+                <goals>
+                  <goal>copy-resources</goal>
+                </goals>
+                <configuration>
+                  <outputDirectory>${project.build.outputDirectory}/META-INF/versions/9</outputDirectory>
+                  <resources>
+                    <resource>
+                      <directory>${project.build.outputDirectory}</directory>
+                      <includes>
+                        <include>module-info.class</include>
+                      </includes>
+                    </resource>
+                  </resources>
+                </configuration>
+              </execution>
+            </executions>
+          </plugin>
+          <plugin>
+            <artifactId>maven-jar-plugin</artifactId>
+            <executions>
+              <execution>
+                <id>default-jar</id>
+                <configuration>
+                  <archive>
+                    <manifestEntries>
+                      <Multi-Release>true</Multi-Release>
+                    </manifestEntries>
+                  </archive>
+                  <excludes>
+                    <exclude>module-info.class</exclude>
+                  </excludes>
+                </configuration>
+              </execution>
+            </executions>
           </plugin>
         </plugins>
       </build>

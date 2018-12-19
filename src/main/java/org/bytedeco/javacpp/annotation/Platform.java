@@ -71,7 +71,8 @@ public @interface Platform {
     String[] linkpath()    default {};
     /** A list of library resources passed to the native compiler for use at link time. */
     String[] linkresource() default {};
-    /** A list of libraries the native compiler should link with. */
+    /** A list of libraries the native compiler should link with.
+     *  Accepts "@" + optional version tag and "#" + a second optional name used at extraction (or empty to prevent it). */
     String[] link()        default {};
     /** A list of framework paths passed to the native compiler for use at link time. */
     String[] frameworkpath() default {};
@@ -80,8 +81,11 @@ public @interface Platform {
     /** A list of paths from which to attempt preloading libraries from the
      *  {@link #link()} and {@link #preload()} lists. */
     String[] preloadpath() default {};
-    /** A list of libraries, in addition to {@link #link()}, that should be
-     *  extracted and preloaded, if possible. */
+    /** A list of resources from which to attempt preloading libraries from the
+     *  {@link #link()} and {@link #preload()} lists. */
+    String[] preloadresource() default {};
+    /** A list of libraries, in addition to {@link #link()}, that should be extracted and preloaded, if possible.
+     *  Accepts "@" + optional version tag and "#" + a second optional name used at extraction (or empty to prevent it). */
     String[] preload()     default {};
     /** A list of paths from which to copy resources from the {@link #resource()} list. */
     String[] resourcepath() default {};
@@ -92,6 +96,7 @@ public @interface Platform {
     String[] extension()   default {};
     /** The native JNI library associated with this class that {@link Builder} should
      *  try to build and {@link Loader} should try to load. If left empty, this value
-     *  defaults to "jni" + the name that {@link Class#getSimpleName()} returns. */
+     *  defaults to "jni" + the name that {@link Class#getSimpleName()} returns for
+     *  {@link Properties#target} or {@link Properties#global} class, or this class, if not given. */
     String   library()     default "";
 }

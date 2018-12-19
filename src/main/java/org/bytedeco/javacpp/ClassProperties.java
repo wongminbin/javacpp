@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2011-2017 Samuel Audet
+ * Copyright (C) 2011-2018 Samuel Audet
  *
  * Licensed either under the Apache License, Version 2.0, or (at your option)
  * under the terms of the GNU General Public License as published by
@@ -60,7 +60,7 @@ public class ClassProperties extends HashMap<String,List<String>> {
             }
             if (k.equals("platform.includepath") || k.equals("platform.includeresource") || k.equals("platform.include")
                 || k.equals("platform.linkpath") || k.equals("platform.linkresource") || k.equals("platform.link")
-                || k.equals("platform.preloadpath") || k.equals("platform.preload")
+                || k.equals("platform.preloadpath") || k.equals("platform.preloadresource") || k.equals("platform.preload")
                 || k.equals("platform.resourcepath") || k.equals("platform.resource")
                 || k.equals("platform.frameworkpath") || k.equals("platform.framework")
                 || k.equals("platform.library.suffix") || k.equals("platform.extension")) {
@@ -135,7 +135,7 @@ public class ClassProperties extends HashMap<String,List<String>> {
         classList.add(0, c);
         while (!c.isAnnotationPresent(org.bytedeco.javacpp.annotation.Properties.class)
                 && !c.isAnnotationPresent(Platform.class) && c.getSuperclass() != null
-                && c.getSuperclass() != Object.class) {
+                && c.getSuperclass() != Object.class && c.getSuperclass() != Pointer.class) {
             // accumulate superclasses to process native methods from those as well
             classList.add(0, c = c.getSuperclass());
         }
@@ -167,6 +167,15 @@ public class ClassProperties extends HashMap<String,List<String>> {
             if (target.length() > 0) {
                 addAll("target", target);
             }
+            String global = classProperties.global();
+            if (global.length() == 0) {
+                global = target;
+            } else if (target.length() > 0 && !global.startsWith(target)) {
+                global = target + "." + global;
+            }
+            if (global.length() > 0) {
+                addAll("global", global);
+            }
             String helper = classProperties.helper();
             if (helper.length() > 0) {
                 addAll("helper", helper);
@@ -179,9 +188,14 @@ public class ClassProperties extends HashMap<String,List<String>> {
         }
 
         String[] pragma = {}, define = {}, exclude = {}, include = {}, cinclude = {}, includepath = {}, includeresource = {}, compiler = {},
-                 linkpath = {}, linkresource = {}, link = {}, frameworkpath = {}, framework = {}, preloadpath = {}, preload = {},
+                 linkpath = {}, linkresource = {}, link = {}, frameworkpath = {}, framework = {}, preloadpath = {}, preloadresource = {}, preload = {},
                  resourcepath = {}, resource = {}, extension = {};
         String library = "jni" + c.getSimpleName();
+        List<String> targets = get("global");
+        if (targets != null && targets.size() > 0) {
+            String target = targets.get(targets.size() - 1);
+            library = "jni" + target.substring(target.lastIndexOf('.') + 1);
+        }
         for (Platform p : platforms != null ? platforms : new Platform[0]) {
             String[][] names = { p.value().length > 0 ? p.value() : defaultNames, p.not() };
             boolean[] matches = { false, false };
@@ -218,6 +232,7 @@ public class ClassProperties extends HashMap<String,List<String>> {
                 if (p.link()       .length > 0) { link        = p.link();        }
                 if (p.frameworkpath().length > 0) { frameworkpath = p.frameworkpath(); }
                 if (p.framework()  .length > 0) { framework   = p.framework();   }
+                if (p.preloadresource().length > 0) { preloadresource = p.preloadresource(); }
                 if (p.preloadpath().length > 0) { preloadpath = p.preloadpath(); }
                 if (p.preload()    .length > 0) { preload     = p.preload();     }
                 if (p.resourcepath().length > 0) { resourcepath = p.resourcepath(); }
@@ -263,6 +278,7 @@ public class ClassProperties extends HashMap<String,List<String>> {
         addAll("platform.link", link);
         addAll("platform.frameworkpath", frameworkpath);
         addAll("platform.framework", framework);
+        addAll("platform.preloadresource", preloadresource);
         addAll("platform.preloadpath", preloadpath);
         addAll("platform.preload", preload);
         addAll("platform.resourcepath", resourcepath);

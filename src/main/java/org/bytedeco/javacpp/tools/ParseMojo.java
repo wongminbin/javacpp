@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2014-2018 Samuel Audet
+ * Copyright (C) 2018 Samuel Audet
  *
  * Licensed either under the Apache License, Version 2.0, or (at your option)
  * under the terms of the GNU General Public License as published by
@@ -22,14 +22,20 @@
 
 package org.bytedeco.javacpp.tools;
 
+import org.apache.maven.plugin.MojoExecutionException;
+import org.apache.maven.plugins.annotations.LifecyclePhase;
+import org.apache.maven.plugins.annotations.Mojo;
+
 /**
+ * A {@link BuildMojo} that always forces {@link BuildMojo#generate} to false,
+ * with the goal of parsing header files instead.
  *
  * @author Samuel Audet
  */
-class Declaration {
-    Type type = null;
-    Declarator declarator = null;
-    boolean abstractMember = false, constMember = false, inaccessible = false,
-            incomplete = false, function = false, variable = false, comment = false;
-    String signature = "", text = "";
+@Mojo(name = "parse", defaultPhase = LifecyclePhase.GENERATE_SOURCES)
+public class ParseMojo extends BuildMojo {
+    @Override public void execute() throws MojoExecutionException {
+        generate = false;
+        super.execute();
+    }
 }

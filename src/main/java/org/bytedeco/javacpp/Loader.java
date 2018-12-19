@@ -28,8 +28,8 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.JarURLConnection;
-import java.net.MalformedURLException;
 import java.net.URI;
 import java.net.URISyntaxException;
 import java.net.URL;
@@ -42,7 +42,6 @@ import java.nio.file.Paths;
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.Collections;
 import java.util.Deque;
 import java.util.Enumeration;
 import java.util.HashMap;
@@ -50,7 +49,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 import java.util.WeakHashMap;
-import java.util.concurrent.locks.ReentrantLock;
 import java.util.jar.JarEntry;
 import java.util.jar.JarFile;
 import org.bytedeco.javacpp.annotation.Cast;
@@ -218,7 +216,7 @@ public class Loader {
                 if (p.pragma().length > 0 || p.define().length > 0 || p.exclude().length > 0 || p.include().length > 0 || p.cinclude().length > 0
                     || p.includepath().length > 0 || p.includeresource().length > 0 || p.compiler().length > 0
                     || p.linkpath().length > 0 || p.linkresource().length > 0 || p.link().length > 0 || p.frameworkpath().length > 0
-                    || p.framework().length > 0 || p.preloadpath().length > 0 || p.preload().length > 0
+                    || p.framework().length > 0 || p.preloadresource().length > 0 || p.preloadpath().length > 0 || p.preload().length > 0
                     || p.resourcepath().length > 0 || p.resource().length > 0 || p.library().length() > 0) {
                     break;
                 }
@@ -321,7 +319,7 @@ public class Loader {
      * @see #cacheResource(URL)
      */
     public static File cacheResource(Class cls, String name) throws IOException {
-        return cacheResource(cls.getResource(name));
+        return cacheResource(findResource(cls, name));
     }
 
     /**
@@ -399,6 +397,13 @@ public class Loader {
                 }
                 cacheSubdir = new File(cacheSubdir, subdirName);
             }
+        } else if (urlConnection instanceof HttpURLConnection) {
+            size = urlConnection.getContentLength();
+            timestamp = urlConnection.getLastModified();
+            if (!noSubdir) {
+                String path = resourceURL.getHost() + resourceURL.getPath();
+                cacheSubdir = new File(cacheSubdir, path.substring(0, path.lastIndexOf('/') + 1));
+            }
         } else {
             size = urlFile.length();
             timestamp = urlFile.lastModified();
@@ -417,9 +422,9 @@ public class Loader {
         File lockFile = new File(cacheDir, ".lock");
         FileChannel lockChannel = null;
         FileLock lock = null;
-        ReentrantLock threadLock = null;
         if (target != null && target.length() > 0) {
             // ... create symbolic link to already extracted library or ...
+            synchronized (Runtime.getRuntime()) {
             try {
                 Path path = file.toPath(), targetPath = Paths.get(target);
                 if ((!file.exists() || !Files.isSymbolicLink(path) || !Files.readSymbolicLink(path).equals(targetPath))
@@ -427,8 +432,6 @@ public class Loader {
                     if (logger.isDebugEnabled()) {
                         logger.debug("Locking " + cacheDir + " to create symbolic link");
                     }
-                    threadLock = new ReentrantLock();
-                    threadLock.lock();
                     lockChannel = new FileOutputStream(lockFile).getChannel();
                     lock = lockChannel.lock();
                     if ((!file.exists() || !Files.isSymbolicLink(path) || !Files.readSymbolicLink(path).equals(targetPath))
@@ -460,13 +463,12 @@ public class Loader {
                 if (lockChannel != null) {
                     lockChannel.close();
                 }
-                if (threadLock != null) {
-                    threadLock.unlock();
-                }
+            }
             }
         } else {
             if (urlFile.exists() && reference) {
                 // ... try to create a symbolic link to the existing file, if we can, ...
+                synchronized (Runtime.getRuntime()) {
                 try {
                     Path path = file.toPath(), urlPath = urlFile.toPath();
                     if ((!file.exists() || !Files.isSymbolicLink(path) || !Files.readSymbolicLink(path).equals(urlPath))
@@ -474,8 +476,6 @@ public class Loader {
                         if (logger.isDebugEnabled()) {
                             logger.debug("Locking " + cacheDir + " to create symbolic link");
                         }
-                        threadLock = new ReentrantLock();
-                        threadLock.lock();
                         lockChannel = new FileOutputStream(lockFile).getChannel();
                         lock = lockChannel.lock();
                         if ((!file.exists() || !Files.isSymbolicLink(path) || !Files.readSymbolicLink(path).equals(urlPath))
@@ -505,21 +505,18 @@ public class Loader {
                     if (lockChannel != null) {
                         lockChannel.close();
                     }
-                    if (threadLock != null) {
-                        threadLock.unlock();
-                    }
+                }
                 }
             }
             // ... check if it has not already been extracted, and if not ...
             if (!file.exists() || file.length() != size || file.lastModified() != timestamp
                     || !cacheSubdir.equals(file.getCanonicalFile().getParentFile())) {
                 // ... add lock to avoid two JVMs access cacheDir simultaneously and ...
+                synchronized (Runtime.getRuntime()) {
                 try {
                     if (logger.isDebugEnabled()) {
                         logger.debug("Locking " + cacheDir + " before extracting");
                     }
-                    threadLock = new ReentrantLock();
-                    threadLock.lock();
                     lockChannel = new FileOutputStream(lockFile).getChannel();
                     lock = lockChannel.lock();
                     // ... check if other JVM has extracted it before this JVM get the lock ...
@@ -540,9 +537,7 @@ public class Loader {
                     if (lockChannel != null) {
                         lockChannel.close();
                     }
-                    if (threadLock != null) {
-                        threadLock.unlock();
-                    }
+                }
                 }
             }
         }
@@ -569,7 +564,7 @@ public class Loader {
      */
     public static File extractResource(Class cls, String name, File directory,
             String prefix, String suffix) throws IOException {
-        return extractResource(cls.getResource(name), directory, prefix, suffix);
+        return extractResource(findResource(cls, name), directory, prefix, suffix);
     }
 
     /**
@@ -696,32 +691,71 @@ public class Loader {
         return file;
     }
 
+    /** Returns {@code findResources(cls, name, 1)[0]} or null if none. */
+    public static URL findResource(Class cls, String name) throws IOException {
+        URL[] url = findResources(cls, name, 1);
+        return url.length > 0 ? url[0] : null;
+    }
+
+    /** Returns {@code findResources(cls, name, -1)}. */
+    public static URL[] findResources(Class cls, String name) throws IOException {
+        return findResources(cls, name, -1);
+    }
+
     /**
-     * Finds by name resources using the {@link ClassLoader} of the specified {@link Class}.
-     * Names not prefixed with '/' are considered relative to the Class.
+     * Finds by name resources using the {@link Class} and its {@link ClassLoader}.
+     * Names not prefixed with '/' are considered in priority relative to the Class,
+     * but parent packages, including the default one, also get searched.
      *
      * @param cls the Class from whose ClassLoader to load resources
-     * @param name of the resources passed to {@link ClassLoader#getResources(String)}
+     * @param name of the resources passed to {@link Class#getResource(String)} and {@link ClassLoader#getResources(String)}
+     * @param maxLength of the array to return, or -1 for no limit
      * @return URLs to the resources
      * @throws IOException
      */
-    public static URL[] findResources(Class cls, String name) throws IOException {
+    public static URL[] findResources(Class cls, String name, int maxLength) throws IOException {
+        if (maxLength == 0) {
+            return new URL[0];
+        }
         while (name.contains("//")) {
             name = name.replace("//", "/");
         }
+
+        // Under JPMS, Class.getResource() and ClassLoader.getResources() do not return the same URLs
+        URL url = cls.getResource(name);
+        if (url != null && maxLength == 1) {
+            return new URL[] {url};
+        }
+
+        String path = "";
         if (!name.startsWith("/")) {
             String s = cls.getName().replace('.', '/');
             int n = s.lastIndexOf('/');
             if (n >= 0) {
-                name = s.substring(0, n + 1) + name;
+                path = s.substring(0, n + 1);
             }
         } else {
             name = name.substring(1);
         }
-        Enumeration<URL> urls = cls.getClassLoader().getResources(name);
+        Enumeration<URL> urls = cls.getClassLoader().getResources(path + name);
         ArrayList<URL> array = new ArrayList<URL>();
-        while (urls.hasMoreElements()) {
-            array.add(urls.nextElement());
+        if (url != null) {
+            array.add(url);
+        }
+        while (url == null && !urls.hasMoreElements() && path.length() > 0) {
+            int n = path.lastIndexOf('/', path.length() - 2);
+            if (n >= 0) {
+                path = path.substring(0, n + 1);
+            } else {
+                path = "";
+            }
+            urls = cls.getClassLoader().getResources(path + name);
+        }
+        while (urls.hasMoreElements() && (maxLength < 0 || array.size() < maxLength)) {
+            url = urls.nextElement();
+            if (!array.contains(url)) {
+                array.add(url);
+            }
         }
         return array.toArray(new URL[array.size()]);
     }
@@ -731,7 +765,7 @@ public class Loader {
     /** Temporary directory set and returned by {@link #getTempDir()}. */
     static File tempDir = null;
     /** Contains all the native libraries that we have loaded to avoid reloading them. */
-    static Map<String,String> loadedLibraries = Collections.synchronizedMap(new HashMap<String,String>());
+    static Map<String,String> loadedLibraries = new HashMap<String,String>();
 
     static boolean pathsFirst = false;
     static {
@@ -787,6 +821,11 @@ public class Loader {
         return tempDir;
     }
 
+    /** Returns a Map that relates each library name to the path of the loaded file. */
+    public static synchronized Map<String,String> getLoadedLibraries() {
+        return new HashMap<String,String>(loadedLibraries);
+    }
+
     /** Returns {@code System.getProperty("org.bytedeco.javacpp.loadlibraries")}.
      *  Flag set by the {@link Builder} to tell us not to try to load anything. */
     public static boolean isLoadLibraries() {
@@ -827,13 +866,13 @@ public class Loader {
 
             // check in priority the platforms inside our properties annotation, before inherited ones
             Platform[] platforms = classProperties.value();
-            if (platforms != null) {
+            if (platforms != null && platforms.length > 0) {
                 for (Platform p : platforms) {
                     if (checkPlatform(p, properties, defaultNames)) {
                         return true;
                     }
                 }
-            } else if (classes != null) {
+            } else if (classes != null && classes.length > 0) {
                 for (Class c : classes) {
                     if (checkPlatform(c, properties)) {
                         return true;
@@ -929,7 +968,7 @@ public class Loader {
         ClassProperties p = loadProperties(cls, properties, true);
 
         // Force initialization of all the target classes in case they need it
-        List<String> targets = p.get("target");
+        List<String> targets = p.get("global");
         if (targets.isEmpty()) {
             if (p.getInheritedClasses() != null) {
                 for (Class c : p.getInheritedClasses()) {
@@ -982,19 +1021,36 @@ public class Loader {
             }
         }
 
-        try {
-            String library = p.getProperty("platform.library");
-            URL[] urls = findLibrary(cls, p, library, pathsFirst);
-            String filename = loadLibrary(urls, library, preloaded.toArray(new String[preloaded.size()]));
-            if (cacheDir != null && filename != null && filename.startsWith(cacheDir)) {
-                createLibraryLink(filename, p, library);
+        int librarySuffix = -1;
+    tryAgain:
+        while (true) {
+            try {
+                String library = p.getProperty("platform.library");
+                if (librarySuffix >= 0) {
+                    // try to load the JNI library using a different name
+                    library += "#" + library + librarySuffix;
+                }
+                URL[] urls = findLibrary(cls, p, library, pathsFirst);
+                String filename = loadLibrary(urls, library, preloaded.toArray(new String[preloaded.size()]));
+                if (cacheDir != null && filename != null && filename.startsWith(cacheDir)) {
+                    createLibraryLink(filename, p, library);
+                }
+                return filename;
+            } catch (UnsatisfiedLinkError e) {
+                Throwable t = e;
+                while (t != null) {
+                    if (t instanceof UnsatisfiedLinkError &&
+                            t.getMessage().contains("already loaded in another classloader")) {
+                        librarySuffix++;
+                        continue tryAgain;
+                    }
+                    t = t.getCause() != t ? t.getCause() : null;
+                }
+                if (preloadError != null && e.getCause() == null) {
+                    e.initCause(preloadError);
+                }
+                throw e;
             }
-            return filename;
-        } catch (UnsatisfiedLinkError e) {
-            if (preloadError != null && e.getCause() == null) {
-                e.initCause(preloadError);
-            }
-            throw e;
         }
     }
 
@@ -1063,6 +1119,7 @@ public class Loader {
         List<String> paths = new ArrayList<String>();
         paths.addAll(properties.get("platform.linkpath"));
         paths.addAll(properties.get("platform.preloadpath"));
+        String[] resources = properties.get("platform.preloadresource").toArray(new String[0]);
         String libpath = System.getProperty("java.library.path", "");
         if (libpath.length() > 0 && (pathsFirst || !isLoadLibraries() || reference)) {
             // leave loading from "java.library.path" to System.loadLibrary() as fallback,
@@ -1073,18 +1130,24 @@ public class Loader {
         for (int i = 0; cls != null && i < styles.length; i++) {
             // ... then find it from in our resources ...
             for (String extension : Arrays.copyOf(extensions, extensions.length + 1)) {
-                String subdir = platform + (extension == null ? "" : extension) + "/";
-                URL u = cls.getResource(subdir + styles[i]);
-                if (u != null) {
-                    if (reference) {
-                        try {
-                            u = new URL(u + "#" + styles2[i]);
-                        } catch (MalformedURLException e) {
-                            throw new RuntimeException(e);
-                        }
+                for (String resource : Arrays.copyOf(resources, resources.length + 1)) {
+                    if (resource != null && !resource.endsWith("/")) {
+                        resource += "/";
                     }
-                    if (!urls.contains(u)) {
-                        urls.add(u);
+                    String subdir = (resource == null ? "" : "/" + resource) + platform
+                                  + (extension == null ? "" : extension) + "/";
+                    try {
+                        URL u = findResource(cls, subdir + styles[i]);
+                        if (u != null) {
+                            if (reference) {
+                                u = new URL(u + "#" + styles2[i]);
+                            }
+                            if (!urls.contains(u)) {
+                                urls.add(u);
+                            }
+                        }
+                    } catch (IOException e) {
+                        throw new RuntimeException(e);
                     }
                 }
             }
@@ -1103,7 +1166,7 @@ public class Loader {
                         if (!urls.contains(u)) {
                             urls.add(k++, u);
                         }
-                    } catch (MalformedURLException ex) {
+                    } catch (IOException ex) {
                         throw new RuntimeException(ex);
                     }
                 }
@@ -1124,7 +1187,7 @@ public class Loader {
      *         (but {@code if (!isLoadLibraries) { return null; }})
      * @throws UnsatisfiedLinkError on failure or when interrupted
      */
-    public synchronized static String loadLibrary(URL[] urls, String libnameversion, String ... preloaded) {
+    public static synchronized String loadLibrary(URL[] urls, String libnameversion, String ... preloaded) {
         if (!isLoadLibraries()) {
             return null;
         }

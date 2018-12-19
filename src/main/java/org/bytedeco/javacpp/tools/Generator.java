@@ -47,6 +47,7 @@ import java.util.Map;
 import java.util.Properties;
 import java.util.Set;
 import org.bytedeco.javacpp.BoolPointer;
+import org.bytedeco.javacpp.BooleanPointer;
 import org.bytedeco.javacpp.BytePointer;
 import org.bytedeco.javacpp.CLongPointer;
 import org.bytedeco.javacpp.CharPointer;
@@ -72,6 +73,7 @@ import org.bytedeco.javacpp.annotation.ByVal;
 import org.bytedeco.javacpp.annotation.Cast;
 import org.bytedeco.javacpp.annotation.Const;
 import org.bytedeco.javacpp.annotation.Convention;
+import org.bytedeco.javacpp.annotation.CriticalRegion;
 import org.bytedeco.javacpp.annotation.Function;
 import org.bytedeco.javacpp.annotation.Index;
 import org.bytedeco.javacpp.annotation.MemberGetter;
@@ -113,6 +115,7 @@ import org.bytedeco.javacpp.annotation.Virtual;
  * @see Cast
  * @see Const
  * @see Convention
+ * @see CriticalRegion
  * @see Function
  * @see Index
  * @see MemberGetter
@@ -145,7 +148,7 @@ public class Generator {
     static enum ShortEnum { SHORT; short value; }
     static enum IntEnum { INT; int value; }
     static enum LongEnum { LONG; long value; }
-    static final String JNI_VERSION = "JNI_VERSION_1_4";
+    static final String JNI_VERSION = "JNI_VERSION_1_6";
     static final List<Class> baseClasses = Arrays.asList(new Class[] {
             Loader.class,
             Pointer.class,
@@ -157,6 +160,7 @@ public class Generator {
             FloatPointer.class,
             DoublePointer.class,
             CharPointer.class,
+            BooleanPointer.class,
             PointerPointer.class,
             BoolPointer.class,
             CLongPointer.class,
@@ -449,6 +453,10 @@ public class Generator {
         }
         out.println("static jmethodID JavaCPP_initMID = NULL;");
         out.println("static jmethodID JavaCPP_arrayMID = NULL;");
+        out.println("static jmethodID JavaCPP_arrayOffsetMID = NULL;");
+        out.println("static jfieldID JavaCPP_bufferPositionFID = NULL;");
+        out.println("static jfieldID JavaCPP_bufferLimitFID = NULL;");
+        out.println("static jfieldID JavaCPP_bufferCapacityFID = NULL;");
         out.println("static jmethodID JavaCPP_stringMID = NULL;");
         out.println("static jmethodID JavaCPP_getBytesMID = NULL;");
         out.println("static jmethodID JavaCPP_toStringMID = NULL;");
@@ -1524,6 +1532,26 @@ public class Generator {
         out.println("    if (JavaCPP_arrayMID == NULL) {");
         out.println("        return JNI_ERR;");
         out.println("    }");
+        out.println("    JavaCPP_arrayOffsetMID = JavaCPP_getMethodID(env, " +
+                jclasses.index(Buffer.class) + ", \"arrayOffset\", \"()I\");");
+        out.println("    if (JavaCPP_arrayOffsetMID == NULL) {");
+        out.println("        return JNI_ERR;");
+        out.println("    }");
+        out.println("    JavaCPP_bufferPositionFID = JavaCPP_getFieldID(env, " +
+                jclasses.index(Buffer.class) + ", \"position\", \"I\");");
+        out.println("    if (JavaCPP_bufferPositionFID == NULL) {");
+        out.println("        return JNI_ERR;");
+        out.println("    }");
+        out.println("    JavaCPP_bufferLimitFID = JavaCPP_getFieldID(env, " +
+                jclasses.index(Buffer.class) + ", \"limit\", \"I\");");
+        out.println("    if (JavaCPP_bufferLimitFID == NULL) {");
+        out.println("        return JNI_ERR;");
+        out.println("    }");
+        out.println("    JavaCPP_bufferCapacityFID = JavaCPP_getFieldID(env, " +
+                jclasses.index(Buffer.class) + ", \"capacity\", \"I\");");
+        out.println("    if (JavaCPP_bufferCapacityFID == NULL) {");
+        out.println("        return JNI_ERR;");
+        out.println("    }");
         out.println("    JavaCPP_stringMID = JavaCPP_getMethodID(env, " +
                 jclasses.index(String.class) + ", \"<init>\", \"([B)V\");");
         out.println("    if (JavaCPP_stringMID == NULL) {");
@@ -1756,10 +1784,11 @@ public class Generator {
                 }
                 if (!cls.isAnnotationPresent(Opaque.class)) {
                     out.println("    jlong position = env->GetLongField(obj, JavaCPP_positionFID);");
-                    out.println("    ptr += position;");
                     if (methodInfo.bufferGetter) {
-                        out.println("    jlong size = env->GetLongField(obj, JavaCPP_limitFID);");
-                        out.println("    size -= position;");
+                        out.println("    jlong limit = env->GetLongField(obj, JavaCPP_limitFID);");
+                        out.println("    jlong capacity = env->GetLongField(obj, JavaCPP_capacityFID);");
+                    } else {
+                        out.println("    ptr += position;");
                     }
                 }
             }
@@ -1871,7 +1900,7 @@ public class Generator {
                         methodInfo.parameterTypes[j].getComponentType().isPrimitive()) {
                     out.print("arg" + j + " == NULL ? NULL : ");
                     String s = methodInfo.parameterTypes[j].getComponentType().getName();
-                    if (methodInfo.valueGetter || methodInfo.valueSetter ||
+                    if (methodInfo.criticalRegion || methodInfo.valueGetter || methodInfo.valueSetter ||
                             methodInfo.memberGetter || methodInfo.memberSetter) {
                         out.println("(j" + s + "*)env->GetPrimitiveArrayCritical(arg" + j + ", NULL);");
                     } else {
@@ -1886,8 +1915,8 @@ public class Generator {
                 } else if (Buffer.class.isAssignableFrom(methodInfo.parameterTypes[j])) {
                     out.println("arg" + j + " == NULL ? NULL : (" + typeName[0] + typeName[1] + ")env->GetDirectBufferAddress(arg" + j + ");");
                     if (adapterInfo != null || prevAdapterInfo != null) {
-                        out.println("    jlong size" + j +
-                                " = arg" + j + " == NULL ? 0 : env->GetDirectBufferCapacity(arg" + j + ");");
+                        out.println("    jlong size" + j + " = arg" + j + " == NULL ? 0 : env->GetIntField(arg" + j +
+                                ", JavaCPP_bufferLimitFID);");
                         out.println("    void* owner" + j + " = (void*)ptr" + j + ";");
                     }
                     if (methodInfo.parameterTypes[j] != Buffer.class) {
@@ -1896,17 +1925,28 @@ public class Generator {
                         paramName = paramName.substring(0, paramName.length() - 6);
                         String paramNameLowerCase = Character.toLowerCase(paramName.charAt(0)) + paramName.substring(1);
                         out.println("    j" + paramNameLowerCase + "Array arr" + j + " = NULL;");
+                        out.println("    jlong offset" + j + " = 0;");
                         out.println("    if (arg" + j + " != NULL && ptr" + j + " == NULL) {");
                         out.println("        arr" + j + " = (j" + paramNameLowerCase + "Array)env->CallObjectMethod(arg" + j + ", JavaCPP_arrayMID);");
+                        out.println("        offset" + j + " = env->CallIntMethod(arg" + j + ", JavaCPP_arrayOffsetMID);");
                         out.println("        if (env->ExceptionOccurred() != NULL) {");
                         out.println("            env->ExceptionClear();");
                         out.println("        } else {");
-                        out.println("            ptr" + j + " = arr" + j + " == NULL ? NULL : env->Get" + paramName + "ArrayElements(arr" + j + ", NULL);");
-                        if (adapterInfo != null || prevAdapterInfo != null) {
-                            out.println("            size" + j + " = env->GetArrayLength(arr" + j + ");");
+                        if (methodInfo.criticalRegion) {
+                            out.println("            ptr" + j + " = arr" + j + " == NULL ? NULL : (" + typeName[0] + typeName[1]
+                                    + ")env->GetPrimitiveArrayCritical(arr" + j + ", NULL) + offset" + j + ";");
+                        } else {
+                            out.println("            ptr" + j + " = arr" + j + " == NULL ? NULL : env->Get"
+                                    + paramName + "ArrayElements(arr" + j + ", NULL) + offset" + j + ";");
                         }
                         out.println("        }");
                         out.println("    }");
+                    }
+                    out.println("    jlong position" + j + " = arg" + j + " == NULL ? 0 : env->GetIntField(arg" + j +
+                            ", JavaCPP_bufferPositionFID);");
+                    out.println("    ptr"  + j + " += position" + j + ";");
+                    if (adapterInfo != null || prevAdapterInfo != null) {
+                        out.println("    size" + j + " -= position" + j + ";");
                     }
                 } else {
                     out.println("arg" + j + ";");
@@ -1949,6 +1989,7 @@ public class Generator {
             String cast = cast(methodInfo.returnType, methodInfo.annotations);
             String[] typeName = methodInfo.returnRaw ? new String[] { "" }
                     : cppCastTypeName(methodInfo.returnType, methodInfo.annotations);
+            Annotation returnBy = by(methodInfo.annotations);
             if (FunctionPointer.class.isAssignableFrom(methodInfo.cls)
                     && !methodInfo.cls.isAnnotationPresent(Namespace.class)
                     && methodInfo.valueGetter) {
@@ -1959,12 +2000,14 @@ public class Generator {
             } else if (methodInfo.returnType.isPrimitive()) {
                 out.println("    " + jniTypeName(methodInfo.returnType) + " rarg = 0;");
                 returnPrefix = typeName[0] + " rval" + typeName[1] + " = " + cast;
+                if ((returnBy instanceof ByPtr) || (returnBy instanceof ByPtrRef)) {
+                    returnPrefix += "*";
+                }
             } else if (Enum.class.isAssignableFrom(methodInfo.returnType)) {
                 accessesEnums = true;
                 out.println("    jobject rarg = JavaCPP_createPointer(env, " + jclasses.index(methodInfo.returnType) + ");");
                 returnPrefix = typeName[0] + " rval" + typeName[1] + " = " + cast;
             } else {
-                Annotation returnBy = by(methodInfo.annotations);
                 String valueTypeName = valueTypeName(typeName);
 
                 returnPrefix = "rptr = " + cast;
@@ -2226,6 +2269,9 @@ public class Generator {
                     methodInfo.parameterTypes[j] == long.class) {
                 out.print("jlong_to_ptr(arg" + j + ")");
             } else if (methodInfo.parameterTypes[j].isPrimitive()) {
+                if (passBy instanceof ByPtr || passBy instanceof ByPtrRef) {
+                    out.print("&");
+                }
                 out.print(cast + "arg" + j);
             } else if (adapterInfo != null) {
                 cast = adapterInfo.cast.trim();
@@ -2270,11 +2316,6 @@ public class Generator {
         if (methodInfo.memberName.length > 2) {
             out.print(methodInfo.memberName[2]);
         }
-        if (by(methodInfo.annotations) instanceof ByRef &&
-                methodInfo.returnType == String.class) {
-            // special considerations for std::string
-            out.print(");\n" + indent + "rptr = rstr.c_str()");
-        }
         if (needSecondCall) {
             call(methodInfo, " : ", true);
             out.print(")");
@@ -2289,6 +2330,12 @@ public class Generator {
         String valueTypeName = valueTypeName(typeName);
         AdapterInformation adapterInfo = adapterInformation(false, valueTypeName, methodInfo.annotations);
         String suffix = methodInfo.deallocator ? "" : ";";
+        if (by(methodInfo.annotations) instanceof ByRef
+                && methodInfo.returnType == String.class
+                && adapterInfo == null) {
+            // special considerations for std::string without adapter
+            out.print(");\n" + indent + "rptr = rstr.c_str()");
+        }
         if (!methodInfo.returnType.isPrimitive() && adapterInfo != null) {
             suffix = ")" + suffix;
         }
@@ -2428,13 +2475,21 @@ public class Generator {
                     }
                 } else if (Buffer.class.isAssignableFrom(methodInfo.returnType)) {
                     if (methodInfo.bufferGetter) {
-                        out.println(indent + "jlong rcapacity = size;");
+                        out.println(indent + "jlong rposition = position;");
+                        out.println(indent + "jlong rlimit = limit;");
+                        out.println(indent + "jlong rcapacity = capacity;");
                     } else if (adapterInfo == null && !(returnBy instanceof ByVal)) {
                         out.println(indent + "jlong rcapacity = rptr != NULL ? 1 : 0;");
                     }
                     out.println(indent + "if (rptr != NULL) {");
                     out.println(indent + "    jlong rcapacityptr = rcapacity * sizeof(rptr[0]);");
                     out.println(indent + "    rarg = env->NewDirectByteBuffer((void*)rptr, rcapacityptr < INT_MAX ? rcapacityptr : INT_MAX);");
+                    if (methodInfo.bufferGetter) {
+                        out.println(indent + "    jlong rpositionptr = rposition * sizeof(rptr[0]);");
+                        out.println(indent + "    jlong rlimitptr = rlimit * sizeof(rptr[0]);");
+                        out.println(indent + "    env->SetIntField(rarg, JavaCPP_bufferPositionFID, rpositionptr < INT_MAX ? rpositionptr : INT_MAX);");
+                        out.println(indent + "    env->SetIntField(rarg, JavaCPP_bufferLimitFID, rlimitptr < INT_MAX ? rlimitptr : INT_MAX);");
+                    }
                     out.println(indent + "}");
                 }
             }
@@ -2479,7 +2534,8 @@ public class Generator {
                         out.println("    if (rptr" + (j+k) + " != " + cast + "ptr" + (j+k) + ") {");
                         out.println("        JavaCPP_initPointer(env, arg" + j + ", rptr" + (j+k) + ", rsize" + (j+k) + ", rowner" + (j+k) + ", &" + adapterInfo.name + "::deallocate);");
                         out.println("    } else {");
-                        out.println("        env->SetLongField(arg" + j + ", JavaCPP_limitFID, rsize" + (j+k) + " + position" + (j+k) + ");");
+                        out.println("        env->SetLongField(arg" + j + ", JavaCPP_limitFID, rsize" + (j+k)
+                                + (!methodInfo.parameterTypes[j].isAnnotationPresent(Opaque.class) ? " + position" + (j+k) : "") + ");");
                         out.println("    }");
                     }
                 } else if ((passBy instanceof ByPtrPtr || passBy instanceof ByPtrRef) &&
@@ -2502,7 +2558,7 @@ public class Generator {
                     out.println("    }");
                 }
                 out.print("    if (arg" + j + " != NULL) ");
-                if (methodInfo.valueGetter || methodInfo.valueSetter ||
+                if (methodInfo.criticalRegion || methodInfo.valueGetter || methodInfo.valueSetter ||
                         methodInfo.memberGetter || methodInfo.memberSetter) {
                     out.println("env->ReleasePrimitiveArrayCritical(arg" + j + ", ptr" + j + ", " + releaseArrayFlag + ");");
                 } else {
@@ -2523,10 +2579,13 @@ public class Generator {
                 String parameterSimpleName = methodInfo.parameterTypes[j].getSimpleName();
                 parameterSimpleName = parameterSimpleName.substring(0, parameterSimpleName.length() - 6);
                 String parameterSimpleNameLowerCase = Character.toLowerCase(parameterSimpleName.charAt(0)) + parameterSimpleName.substring(1);
-                
-                out.println("env->Release" + parameterSimpleName + "ArrayElements(arr" + j + ", " + 
-                            "(j" + parameterSimpleNameLowerCase + "*)ptr" + j + ", " + 
-                            releaseArrayFlag + ");");
+                if (methodInfo.criticalRegion) {
+                    out.println("env->ReleasePrimitiveArrayCritical(arr" + j + ", ptr" + j + " - position" + j +", " + releaseArrayFlag + ");");
+                } else {
+                    out.println("env->Release" + parameterSimpleName + "ArrayElements(arr" + j + ", " +
+                                "(j" + parameterSimpleNameLowerCase + "*)(ptr" + j + " - position" + j +"), " +
+                                releaseArrayFlag + ");");
+                }
             }
         }
     }
@@ -2590,7 +2649,7 @@ public class Generator {
                        +  methodInfo.memberName[0] + parameterDeclaration + ";\n    "
                        +  returnConvention[0] + "super_" + methodInfo.memberName[0] + nonconstParamDeclaration + " { ";
                 if (methodInfo.method.getAnnotation(Virtual.class).value()) {
-                    member += "throw JavaCPP_exception(\"Cannot call a pure virtual function.\"); }";
+                    member += "throw JavaCPP_exception(\"Cannot call pure virtual function " + valueTypeName + "::" + methodInfo.memberName[0] + "().\"); }";
                 } else {
                     member += (callbackReturnType != void.class ? "return " : "") + valueTypeName + "::" + methodInfo.memberName[0] + "(";
                     for (int j = 0; j < callbackParameterTypes.length; j++) {
@@ -2658,8 +2717,11 @@ public class Generator {
         String[] returnTypeName = cppTypeName(callbackReturnType);
         String returnValueTypeName = valueTypeName(returnTypeName);
         AdapterInformation returnAdapterInfo = adapterInformation(false, returnValueTypeName, callbackAnnotations);
+        boolean throwsExceptions = !noException(cls, callbackMethod);
 
-        out.println("    jthrowable exc = NULL;");
+        if (throwsExceptions) {
+            out.println("    jthrowable exc = NULL;");
+        }
         out.println("    JNIEnv* env;");
         out.println("    bool attached = JavaCPP_getEnv(&env);");
         out.println("    if (env == NULL) {");
@@ -2669,10 +2731,12 @@ public class Generator {
         if (callbackParameterTypes.length > 0) {
             out.println("    jvalue args[" + callbackParameterTypes.length + "];");
             for (int j = 0; j < callbackParameterTypes.length; j++) {
+                Annotation passBy = by(callbackParameterAnnotations[j]);
                 if (callbackParameterTypes[j].isPrimitive()) {
                     out.println("    args[" + j + "]." +
                             signature(callbackParameterTypes[j]).toLowerCase() + " = (" +
-                            jniTypeName(callbackParameterTypes[j]) + ")arg" + j + ";");
+                            jniTypeName(callbackParameterTypes[j]) + ")" +
+                            (passBy instanceof ByPtr || passBy instanceof ByPtrRef ? "*arg" : "arg") + j + ";");
                 } else if (Enum.class.isAssignableFrom(callbackParameterTypes[j])) {
                     accessesEnums = true;
                     String s = enumValueType(callbackParameterTypes[j]);
@@ -2685,7 +2749,6 @@ public class Generator {
                         out.println("    }");
                     }
                 } else {
-                    Annotation passBy = by(callbackParameterAnnotations[j]);
                     String[] typeName = cppTypeName(callbackParameterTypes[j]);
                     String valueTypeName = valueTypeName(typeName);
                     AdapterInformation adapterInfo = adapterInformation(false, valueTypeName, callbackParameterAnnotations[j]);
@@ -2791,6 +2854,7 @@ public class Generator {
                             out.println("        (*(void(*)(void*))jlong_to_ptr(deallocator" + j + "))((void*)ptr" + j + ");");
                             out.println("    }");
                         }
+                        out.println("    args[" + j + "].l = obj" + j + ";");
                     } else if (Buffer.class.isAssignableFrom(callbackParameterTypes[j])) {
                         if (adapterInfo == null) {
                             out.println("    jlong size" + j + " = ptr" + j + " != NULL ? 1 : 0;");
@@ -2799,6 +2863,7 @@ public class Generator {
                         out.println("        jlong sizeptr = size" + j + " * sizeof(ptr" + j + "[0]);");
                         out.println("        obj" + j + " = env->NewDirectByteBuffer((void*)ptr" + j + ", sizeptr < INT_MAX ? sizeptr : INT_MAX);");
                         out.println("    }");
+                        out.println("    args[" + j + "].l = obj" + j + ";");
                     } else {
                         logger.warn("Callback \"" + callbackMethod + "\" has unsupported parameter type \"" +
                                 callbackParameterTypes[j].getCanonicalName() + "\". Compilation will most likely fail.");
@@ -2829,7 +2894,7 @@ public class Generator {
                     signature(callbackMethod.getParameterTypes()) + ")" + signature(callbackMethod.getReturnType()) + "\");");
             out.println("    }");
         }
-        out.println("    if (env->IsSameObject(obj, NULL)) {");
+        out.println("    if (obj == NULL) {");
         out.println("        JavaCPP_log(\"Function pointer object is NULL in callback for " + cls.getCanonicalName() + ".\");");
         out.println("    } else if (mid == NULL) {");
         out.println("        JavaCPP_log(\"Error getting method ID of function caller \\\"" + callbackMethod + "\\\" for callback.\");");
@@ -2840,9 +2905,11 @@ public class Generator {
             s = Character.toUpperCase(s.charAt(0)) + s.substring(1);
         }
         out.println("        " + returnPrefix + "env->Call" + s + "MethodA(obj, mid, " + (callbackParameterTypes.length == 0 ? "NULL);" : "args);"));
-        out.println("        if ((exc = env->ExceptionOccurred()) != NULL) {");
-        out.println("            env->ExceptionClear();");
-        out.println("        }");
+        if (throwsExceptions) {
+            out.println("        if ((exc = env->ExceptionOccurred()) != NULL) {");
+            out.println("            env->ExceptionClear();");
+            out.println("        }");
+        }
         out.println("    }");
 
         for (int j = 0; j < callbackParameterTypes.length; j++) {
@@ -2922,13 +2989,17 @@ public class Generator {
                 out.println("    " + returnTypeName[0] + " rptr" + returnTypeName[1] + " = JavaCPP_getStringBytes(env, rarg);");
                 if (returnAdapterInfo != null) {
                     out.println("    jlong rsize = 0;");
-                    out.println("    void* rowner = (void*)rptr");
+                    out.println("    void* rowner = (void*)rptr;");
                 }
             } else if (Buffer.class.isAssignableFrom(callbackReturnType)) {
-                out.println("    " + returnTypeName[0] + " rptr" + returnTypeName[1] + " = rarg == NULL ? NULL : env->GetDirectBufferAddress(rarg);");
+                out.println("    " + returnTypeName[0] + " rptr" + returnTypeName[1] + " = rarg == NULL ? NULL : ("
+                        + returnTypeName[0] + returnTypeName[1] + ")env->GetDirectBufferAddress(rarg);");
                 if (returnAdapterInfo != null) {
-                    out.println("    jlong rsize = rarg == NULL ? 0 : env->GetDirectBufferCapacity(rarg);");
+                    out.println("    jlong rsize = rarg == NULL ? 0 : env->GetIntField(rarg, JavaCPP_bufferLimitFID);");
                     out.println("    void* rowner = (void*)rptr;");
+                    out.println("    jlong rposition = rarg == NULL ? 0 : env->GetIntField(rarg, JavaCPP_bufferPositionFID);");
+                    out.println("    rptr += rposition;");
+                    out.println("    rsize -= rposition;");
                 }
             } else if (!callbackReturnType.isPrimitive()) {
                 logger.warn("Callback \"" + callbackMethod + "\" has unsupported return type \"" +
@@ -2937,22 +3008,26 @@ public class Generator {
         }
 
         passesStrings = true;
-        out.println("    if (exc != NULL) {");
-        out.println("        jstring str = (jstring)env->CallObjectMethod(exc, JavaCPP_toStringMID);");
-        out.println("        env->DeleteLocalRef(exc);");
-        out.println("        const char *msg = JavaCPP_getStringBytes(env, str);");
-        out.println("        JavaCPP_exception e(msg);");
-        out.println("        JavaCPP_releaseStringBytes(env, str, msg);");
-        out.println("        env->DeleteLocalRef(str);");
-        out.println("        JavaCPP_detach(attached);");
-        out.println("        throw e;");
-        out.println("    } else {");
-        out.println("        JavaCPP_detach(attached);");
-        out.println("    }");
+        if (throwsExceptions) {
+            out.println("    if (exc != NULL) {");
+            out.println("        jstring str = (jstring)env->CallObjectMethod(exc, JavaCPP_toStringMID);");
+            out.println("        env->DeleteLocalRef(exc);");
+            out.println("        const char *msg = JavaCPP_getStringBytes(env, str);");
+            out.println("        JavaCPP_exception e(msg);");
+            out.println("        JavaCPP_releaseStringBytes(env, str, msg);");
+            out.println("        env->DeleteLocalRef(str);");
+            out.println("        JavaCPP_detach(attached);");
+            out.println("        throw e;");
+            out.println("    } else {");
+            out.println("        JavaCPP_detach(attached);");
+            out.println("    }");
+        } else {
+            out.println("    JavaCPP_detach(attached);");
+        }
 
         if (callbackReturnType != void.class) {
             if (callbackReturnType.isPrimitive()) {
-                out.println("    return " + callbackReturnCast + "rarg;");
+                out.println("    return " + callbackReturnCast + ((returnBy instanceof ByPtr || returnBy instanceof ByPtrRef) ? "&rarg;" : "rarg;"));
             } else if (Enum.class.isAssignableFrom(callbackReturnType)) {
                 out.println("    return " + callbackReturnCast + "rval;");
             } else if (returnAdapterInfo != null) {
@@ -3053,6 +3128,7 @@ public class Generator {
         info.dim    = index != null ? index.value() : 0;
         info.parameterTypes       = method.getParameterTypes();
         info.parameterAnnotations = method.getParameterAnnotations();
+        info.criticalRegion = criticalRegion(info.cls, info.method);
         info.returnRaw = method.isAnnotationPresent(Raw.class);
         info.withEnv = info.returnRaw ? method.getAnnotation(Raw.class).withEnv() : false;
         info.parameterRaw = new boolean[info.parameterAnnotations.length];
@@ -3251,6 +3327,22 @@ public class Generator {
             }
         }
         return info;
+    }
+
+    static boolean criticalRegion(Class<?> cls, Method method) {
+        boolean criticalRegion = baseClasses.contains(cls) ||
+                method.isAnnotationPresent(CriticalRegion.class);
+        while (!criticalRegion && cls != null) {
+            if (criticalRegion = cls.isAnnotationPresent(CriticalRegion.class)) {
+                break;
+            }
+            if (cls.getEnclosingClass() != null) {
+                cls = cls.getEnclosingClass();
+            } else {
+                cls = cls.getSuperclass();
+            }
+        }
+        return criticalRegion;
     }
 
     static boolean noException(Class<?> cls, Method method) {
@@ -3502,7 +3594,9 @@ public class Generator {
             prefix = prefix + "*";
         } else if (by instanceof ByPtrRef) {
             prefix = prefix + "&";
-        } // else ByPtr
+        } else if (by instanceof ByPtr && type.isPrimitive()) {
+            prefix = prefix + "*";
+        }
 
         typeName[0] = prefix;
         typeName[1] = suffix;
@@ -3541,11 +3635,18 @@ public class Generator {
                     continue;
                 }
                 typeName = cppTypeName(type);
-                if (b.length > 1 && b[1] && !typeName[0].endsWith(" const *")) {
-                    typeName[0] = valueTypeName(typeName) + " const *";
-                }
-                if (b.length > 0 && b[0] && !typeName[0].startsWith("const ")) {
-                    typeName[0] = "const " + typeName[0];
+                if (typeName[0].contains("(*")) {
+                    // function pointer
+                    if (b.length > 0 && b[0] && !typeName[0].endsWith("const")) {
+                        typeName[0] += "const";
+                    }
+                } else {
+                    if (b.length > 1 && b[1] && !typeName[0].endsWith(" const *")) {
+                        typeName[0] = valueTypeName(typeName) + " const *";
+                    }
+                    if (b.length > 0 && b[0] && !typeName[0].startsWith("const ")) {
+                        typeName[0] = "const " + typeName[0];
+                    }
                 }
                 Annotation by = by(annotations);
                 if (by instanceof ByPtrPtr) {
@@ -3584,7 +3685,7 @@ public class Generator {
             prefix = "double*";
         } else if (type == char[].class || type == CharBuffer.class || type == CharPointer.class) {
             prefix = "unsigned short*";
-        } else if (type == boolean[].class) {
+        } else if (type == boolean[].class || type == BooleanPointer.class) {
             prefix = "unsigned char*";
         } else if (type == PointerPointer.class) {
             prefix = "void**";

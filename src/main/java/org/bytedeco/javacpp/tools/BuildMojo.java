@@ -43,7 +43,7 @@ import org.bytedeco.javacpp.Loader;
  * @author Arnaud Nauwynck
  * @author Samuel Audet
  */
-@Mojo(name = "build", defaultPhase = LifecyclePhase.PROCESS_CLASSES)
+@Mojo(name = "build", defaultPhase = LifecyclePhase.PROCESS_CLASSES, threadSafe = true)
 public class BuildMojo extends AbstractMojo {
 
     /** Load user classes from classPath. */
@@ -110,6 +110,14 @@ public class BuildMojo extends AbstractMojo {
     @Parameter(property = "javacpp.preloadPaths")
     String[] preloadPaths = null;
 
+    /** Add the path to the "platform.preloadresource" property. */
+    @Parameter(property = "javacpp.preloadResource")
+    String preloadResource = null;
+
+    /** Add the paths to the "platform.preloadresource" property. */
+    @Parameter(property = "javacpp.preloadResources")
+    String[] preloadResources = null;
+
     /** Add the path to the "platform.resourcepath" property. */
     @Parameter(property = "javacpp.resourcePath")
     String resourcePath = null;
@@ -129,6 +137,10 @@ public class BuildMojo extends AbstractMojo {
     /** Output everything in a file named after given outputName. */
     @Parameter(property = "javacpp.outputName")
     String outputName = null;
+
+    /** Generates .cpp files from Java interfaces if found, parsing from header files if not. */
+    @Parameter(property = "javacpp.generate", defaultValue = "true")
+    boolean generate = true;
 
     /** Compile and delete the generated .cpp files. */
     @Parameter(property = "javacpp.compile", defaultValue = "true")
@@ -231,11 +243,14 @@ public class BuildMojo extends AbstractMojo {
                 log.debug("linkResources: " + Arrays.deepToString(linkResources));
                 log.debug("preloadPath: " + preloadPath);
                 log.debug("preloadPaths: " + Arrays.deepToString(preloadPaths));
+                log.debug("preloadResource: " + preloadResource);
+                log.debug("preloadResources: " + Arrays.deepToString(preloadResources));
                 log.debug("resourcePath: " + resourcePath);
                 log.debug("resourcePaths: " + Arrays.deepToString(resourcePaths));
                 log.debug("encoding: " + encoding);
                 log.debug("outputDirectory: " + outputDirectory);
                 log.debug("outputName: " + outputName);
+                log.debug("generate: " + generate);
                 log.debug("compile: " + compile);
                 log.debug("deleteJniFiles: " + deleteJniFiles);
                 log.debug("header: " + header);
@@ -277,6 +292,7 @@ public class BuildMojo extends AbstractMojo {
                     .encoding(encoding)
                     .outputDirectory(outputDirectory)
                     .outputName(outputName)
+                    .generate(generate)
                     .compile(compile)
                     .deleteJniFiles(deleteJniFiles)
                     .header(header)
@@ -330,6 +346,11 @@ public class BuildMojo extends AbstractMojo {
             for (String s : merge(preloadPaths, preloadPath)) {
                 String v = properties.getProperty("platform.preloadpath", "");
                 properties.setProperty("platform.preloadpath",
+                        v.length() == 0 || v.endsWith(separator) ? v + s : v + separator + s);
+            }
+            for (String s : merge(preloadResources, preloadResource)) {
+                String v = properties.getProperty("platform.preloadresource", "");
+                properties.setProperty("platform.preloadresource",
                         v.length() == 0 || v.endsWith(separator) ? v + s : v + separator + s);
             }
             for (String s : merge(resourcePaths, resourcePath)) {
